@@ -122,7 +122,7 @@ OLLAMA_BASE_URL = CONFIG["ollama"]["base_url"]
 OLLAMA_KEEP_ALIVE = CONFIG["ollama"]["keep_alive"]
 
 JARVIS_SYSTEM_PROMPT = CONFIG["system_prompt"]
-
+DEBUG_MOD = False
 
 # ============ State ============
 audio_queue = queue.Queue()
@@ -133,7 +133,6 @@ tts_active = threading.Event()
 interrupt_requested = threading.Event()
 processing_event = threading.Event()
 DEBUG_MIC_COUNTER = [0]
-
 
 # ============ Otomatik ses çıkışı ============
 def pick_output_device():
@@ -149,7 +148,6 @@ def pick_output_device():
     except Exception as e:
         print(f"Cihaz seçim hatası: {e}")
     return None
-
 
 def pick_target_samplerate(device_idx, fallback=44100):
     if device_idx is None:
@@ -167,7 +165,6 @@ def pick_target_samplerate(device_idx, fallback=44100):
 OUTPUT_DEVICE = pick_output_device()
 TARGET_SR = pick_target_samplerate(OUTPUT_DEVICE)
 
-
 def _describe_output():
     if OUTPUT_DEVICE is None:
         return f"sistem default ({TARGET_SR} Hz)"
@@ -177,8 +174,8 @@ def _describe_output():
     except Exception:
         return f"cihaz {OUTPUT_DEVICE} ({TARGET_SR} Hz)"
 
-
-print(f"Ses çıkışı: {_describe_output()}")
+if (DEBUG_MOD == True):
+    print(f"Ses çıkışı: {_describe_output()}")
 
 
 # ============ TTS ============
@@ -334,7 +331,7 @@ def send_audio_and_stream_speech(full_audio):
     
     search_context = ""
     if needs_search:
-        print("[Tavily] Web araması yapılıyor...")
+        print("Searching on web...")
         # Kullanıcının ne sorduğunu metne dökmek için ayrı bir çağrı gerekebilir
         # Veya arama sorgusunu doğrudan modelden isteyebilirsiniz.
         # Basitlik için, kullanıcının sesini tekrar modele gönderip sorguyu çıkarttırıyoruz:
@@ -507,8 +504,7 @@ def continuous_listener():
             except KeyboardInterrupt:
                 print("\nDinleme durduruluyor...")
                 break
-
-
+            
 # ============ Yükleme ============
 def load_llm():
     print("Loading LLM: " + LLM_MODEL)
@@ -524,14 +520,8 @@ def load_llm():
 def load_piper_tts():
     global piper_voice
     print("Piper TTS modeli yükleniyor...")
-    try:
-        # use_cuda=True ile GPU'yu zorla
-        piper_voice = PiperVoice.load(PIPER_MODEL_NAME, use_cuda=True)
-        print("Piper TTS hazır (GPU).")
-    except Exception as e:
-        print(f"GPU yüklenemedi ({e}); CPU'ya dönülüyor.")
-        piper_voice = PiperVoice.load(PIPER_MODEL_NAME)  # CPU fallback
-        print("Piper TTS hazır (CPU).")
+    piper_voice = PiperVoice.load(PIPER_MODEL_NAME)  # CPU fallback
+    print("Piper TTS hazır (CPU).")
 
 
 def mic_monitor():
@@ -542,7 +532,8 @@ def mic_monitor():
         diff = cur - last
         last = cur
         state = "TTS" if (tts_active.is_set() or not tts_queue.empty()) else "BOŞTA"
-        print(f"[DEBUG] Mikrofon {diff} blok/sn  (durum: {state})")
+        if (DEBUG_MOD == True):
+            print(f"[DEBUG] Mikrofon {diff} blok/sn  (durum: {state})")
 
 
 if __name__ == "__main__":
