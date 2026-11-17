@@ -21,7 +21,7 @@ CONFIG_PATH = "config.json"
 
 DEFAULT_CONFIG = {
     "models": {
-        "llm": "gemma4:e2b",
+        "llm": "gemma4:e4b",
         "piper_onnx": "D:/AI_Models/piper_cache/tr_TR-fahrettin-medium.onnx",
     },
     "audio": {
