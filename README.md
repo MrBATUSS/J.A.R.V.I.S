@@ -49,7 +49,7 @@ Donanım odaklı optimizasyonlar ve modern yerel yapay zeka modelleri kullanıla
 
 * **Python:** 3.11+
 
-* **Ollama:** Yerel model sunucusu (`gemma4:4b` veya `gemma4:e4b` modeli indirilmiş olmalı)
+* **Ollama:** Yerel model sunucusu (`gemma4:e4b` veya `gemma4:e2b` modeli indirilmiş olmalı `ollama pull gemma4:e4b` )
 
 * **Piper TTS Modeli:** `tr_TR-dfki-medium.onnx` ve `.json` yapılandırma dosyası ([PiperHub Türkçe Modeller](https://piperhub.org/tr/) üzerinden indirilerek `D:\AI_Models\piper_cache` dizinine yerleştirilmelidir).
 
