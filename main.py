@@ -1,5 +1,6 @@
 import os
 import io
+import json
 import queue
 import sys
 import threading
@@ -10,23 +11,120 @@ import numpy as np
 import sounddevice as sd
 import ollama
 import soundfile as sf
-import librosa
+import soxr
 from piper import PiperVoice
-import tempfile
 import requests
+from tavily import TavilyClient
+from dotenv import load_dotenv
+# ============ Config ============
+CONFIG_PATH = "config.json"
 
-# ============ Sabitler ============
-SAMPLE_RATE = 16000
-BLOCK_DURATION = 0.5
+DEFAULT_CONFIG = {
+    "models": {
+        "llm": "gemma4:e2b",
+        "piper_onnx": "D:/AI_Models/piper_cache/tr_TR-fahrettin-medium.onnx",
+    },
+    "audio": {
+        "sample_rate": 16000,
+        "block_duration": 0.5,
+    },
+    "vad": {
+        "speech_threshold": 0.015,
+        "barge_in_blocks": 3,
+        "silence_blocks": 3,
+        "recent_blocks_maxlen": 5,
+    },
+    "tts": {
+        "wait_timeout_seconds": 0.3,
+    },
+    "ollama": {
+        "base_url": "http://localhost:11434",
+        "keep_alive": -1,
+    },
+    "system_prompt": "Sen JARVIS'sin. Kısa, doğal, akıcı konuş.",
+}
+
+def tavily_search(query: str, max_results: int = 3) -> str:
+    #Tavily ile web araması yapar ve sonuçları metin olarak döndürür.
+    load_dotenv()
+    tavily_client = TavilyClient(api_key=os.getenv("TVLY_API"))
+    try:
+        response = tavily_client.search(
+            query=query,
+            search_depth="basic",  # "advanced" seçilirse 2 kredi harcar
+            max_results=max_results,
+            include_answer=True     # Model için özet bir cevap da döndürür
+        )
+        
+        # Sonuçları LLM'in anlayacağı formata dönüştür
+        results_text = []
+        if response.get("answer"):
+            results_text.append(f"Özet: {response['answer']}")
+        
+        for i, result in enumerate(response.get("results", []), 1):
+            results_text.append(
+                f"{i}. {result['title']}\n"
+                f"   URL: {result['url']}\n"
+                f"   İçerik: {result['content'][:500]}..."  # İlk 500 karakter
+            )
+        
+        return "\n\n".join(results_text) if results_text else "Sonuç bulunamadı."
+        
+    except Exception as e:
+        return f"Arama hatası: {e}"
+
+def _deep_merge(dst, src):
+    for k, v in src.items():
+        if isinstance(v, dict) and isinstance(dst.get(k), dict):
+            _deep_merge(dst[k], v)
+        else:
+            dst[k] = v
+
+
+def load_config(path=CONFIG_PATH):
+    """config.json'u yükle; yoksa varsayılanlarla oluştur; eksik anahtarları tamamla."""
+    cfg = json.loads(json.dumps(DEFAULT_CONFIG))  # deep copy
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                user = json.load(f)
+            _deep_merge(cfg, user)
+            print(f"[config] {path} yüklendi.")
+        except Exception as e:
+            print(f"[config] {path} okunamadı ({e}); varsayılanlar kullanılıyor.")
+    else:
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(DEFAULT_CONFIG, f, indent=2, ensure_ascii=False)
+            print(f"[config] {path} oluşturuldu (varsayılanlarla).")
+        except Exception as e:
+            print(f"[config] {path} yazılamadı ({e}); varsayılanlar kullanılıyor.")
+    return cfg
+
+
+CONFIG = load_config()
+
+SAMPLE_RATE = int(CONFIG["audio"]["sample_rate"])
+BLOCK_DURATION = float(CONFIG["audio"]["block_duration"])
 BLOCK_SIZE = int(SAMPLE_RATE * BLOCK_DURATION)
 
-LLM_MODEL = "gemma4:e2b"
-PIPER_MODEL_NAME = "D:/AI_Models/piper_cache/tr_TR-fahrettin-medium.onnx"
+LLM_MODEL = CONFIG["models"]["llm"]
+PIPER_MODEL_NAME = CONFIG["models"]["piper_onnx"]
 
-SPEECH_THRESHOLD = 0.015
-BARGE_IN_BLOCKS = 3
-DEBUG_MIC_COUNTER = [0]
+SPEECH_THRESHOLD = float(CONFIG["vad"]["speech_threshold"])
+BARGE_IN_BLOCKS = int(CONFIG["vad"]["barge_in_blocks"])
+SILENCE_BLOCKS = int(CONFIG["vad"]["silence_blocks"])
+RECENT_BLOCKS_MAXLEN = int(CONFIG["vad"]["recent_blocks_maxlen"])
 
+TTS_WAIT_TIMEOUT = float(CONFIG["tts"]["wait_timeout_seconds"])
+
+OLLAMA_BASE_URL = CONFIG["ollama"]["base_url"]
+OLLAMA_KEEP_ALIVE = CONFIG["ollama"]["keep_alive"]
+
+JARVIS_SYSTEM_PROMPT = CONFIG["system_prompt"]
+
+
+# ============ State ============
 audio_queue = queue.Queue()
 tts_queue = queue.Queue()
 piper_voice = None
@@ -34,6 +132,7 @@ piper_voice = None
 tts_active = threading.Event()
 interrupt_requested = threading.Event()
 processing_event = threading.Event()
+DEBUG_MIC_COUNTER = [0]
 
 
 # ============ Otomatik ses çıkışı ============
@@ -82,88 +181,42 @@ def _describe_output():
 print(f"Ses çıkışı: {_describe_output()}")
 
 
-# ============ J.A.R.V.I.S. Sistem Promptu ============
-JARVIS_SYSTEM_PROMPT = """
-Sen JARVİSSİN'sin
-KİMLİĞİN VE TARZIN
-Resmiyeti ve soğukluğu bir kenara bırak. Kullanıcıyla aynı frekansta konuşan bir dijital asistansın.
-
-KONUŞMA KURALLARI (SESLİ OKUMA İÇİN KRİTİK)
-Yanıtların sesli okunacak. Doğal, akıcı, samimi bir konuşma dili kullan.
-Asla ama asla:
-- Madde işareti, liste, başlık, emoji, markdown veya kod bloğu kullanma.
-- Kısaltmaları (vb., örn., bkz.) kullanma, kelime olarak açık yaz.
-- Rakamları sayıyla yazma, konuşma dilinde yaz (örneğin yüzde elli, beş tane).
-- "Efendim" kelimesini kesinlikle kullanma. Zaten kankayız, gerek yok.
-
-ŞAKA VE İRONİ
-Kullanıcı absürt, imkânsız veya şaka yollu bir şey söylerse sakın ciddiye alıp ders verme. Aynı kafayla, esprili, hafif iğneleyici bir dost gibi karşılık ver.
-
-UZUNLUK
-Kısa soruya tek cümleyle kısa cevap ver. Açıklama gereken yerlerde en fazla üç dört cümleyle net ve akıcı anlat. Asla yarım cümle bırakma.
-
-BİLGİ VE DOĞRULUK
-Bilmediğin şeyi uydurma, dürüstçe bilmiyorum de geç.
-
-SESSİZ KURAL
-Düşünme sürecini veya notlarını kesinlikle yazma. Sadece sesli okunacak metni çıktı ver.
-"""
-
-
 # ============ TTS ============
+
+def resample_audio(data, orig_sr, target_sr):
+    """float32 numpy dizisini soxr ile hızlıca resample eder."""
+    return soxr.resample(data.astype(np.float32), orig_sr, target_sr)
+
 def synthesize_speech_piper(text):
     if not text.strip() or not piper_voice or interrupt_requested.is_set():
         return
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_wav:
-        temp_wav_path = temp_wav.name
-
     try:
-        with wave.open(temp_wav_path, "wb") as wav_file:
-            piper_voice.synthesize_wav(text, wav_file)
-
-        data, original_sr = sf.read(temp_wav_path)
-        if len(data) == 0:
-            return
-        if original_sr != TARGET_SR:
-            data = librosa.resample(
-                data.astype(np.float32), orig_sr=original_sr, target_sr=TARGET_SR
-            )
-        else:
-            data = data.astype(np.float32)
-
-        if interrupt_requested.is_set():
-            return
-
-        sd.play(data, TARGET_SR, device=OUTPUT_DEVICE)
-
-        time.sleep(0.01)
-        if interrupt_requested.is_set():
-            try:
-                sd.stop()
-            except Exception:
-                pass
-            return
-
-        while True:
-            stream = sd.get_stream()
-            if stream is None or not stream.active:
-                break
+        # Jeneratörden gelen parçaları doğrudan çal
+        for chunk in piper_voice.synthesize(text):
             if interrupt_requested.is_set():
-                try:
-                    sd.stop()
-                except Exception:
-                    pass
                 break
-            time.sleep(0.03)
+            # chunk.audio_float_array: float32 numpy dizisi
+            # chunk.sample_rate: modelin doğal örnekleme hızı (örn. 22050)
+            data = chunk.audio_float_array
+            if len(data) == 0:
+                continue
+
+            # Resample (aşağıda soxr ile hızlandıracağız)
+            if chunk.sample_rate != TARGET_SR:
+                data = resample_audio(data, chunk.sample_rate, TARGET_SR)
+
+            sd.play(data, TARGET_SR, device=OUTPUT_DEVICE)
+
+            # Çalma bitene veya interrupt gelene kadar bekle
+            while sd.get_stream() is not None and sd.get_stream().active:
+                if interrupt_requested.is_set():
+                    sd.stop()
+                    return
+                time.sleep(0.02)
+
     except Exception as e:
         print(f"Piper TTS hatası: {e}")
-    finally:
-        if os.path.exists(temp_wav_path):
-            try:
-                os.remove(temp_wav_path)
-            except OSError:
-                pass
 
 
 def tts_worker():
@@ -255,23 +308,69 @@ def audio_to_wav_bytes(full_audio):
 
 
 def send_audio_and_stream_speech(full_audio):
-    """Ses baytlarını Gemma'ya gönderir, streaming yanıtı TTS'e akıtır."""
     audio_bytes = audio_to_wav_bytes(full_audio)
     print(f"[Ses] Modele gönderiliyor ({len(audio_bytes)} bayt)...")
 
-    response = ollama.chat(
+    # 1. AŞAMA: Modelin aramaya ihtiyacı olup olmadığını belirle
+    # (Bu aşama hızlı olmalı, bu yüzden stream=False kullanıyoruz)
+    decision_prompt = (
+        "Kullanıcının sesli komutunu dinle. Bu komut, güncel veya dış dünya "
+        "bilgisi gerektiriyor mu? (Örneğin: hava durumu, haberler, "
+        "son dakika gelişmeleri, belirli bir konudaki güncel bilgiler). "
+        "Sadece 'EVET' veya 'HAYIR' yaz."
+    )
+    
+    decision_response = ollama.chat(
         model=LLM_MODEL,
         messages=[
-            {"role": "system", "content": JARVIS_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": "Bu ses kaydını dinle. Kullanıcının ne söylediğini anla ve J.A.R.V.I.S. karakterine uygun yanıt ver.",
-                # NOT: Ollama multimodal API'sinde ses için "images" alanı kullanılıyor.
-                # Yeni sürümlerde "audios" alanı da var; 400 alırsanız onu deneyin.
-                "images": [audio_bytes],
-            },
+            {"role": "system", "content": "Sen bir karar vericisin. Sadece EVET veya HAYIR yaz."},
+            {"role": "user", "content": decision_prompt, "images": [audio_bytes]},
         ],
+        stream=False,
+        think=False,
+    )
+    
+    needs_search = "EVET" in decision_response.get("message", {}).get("content", "").upper()
+    
+    search_context = ""
+    if needs_search:
+        print("[Tavily] Web araması yapılıyor...")
+        # Kullanıcının ne sorduğunu metne dökmek için ayrı bir çağrı gerekebilir
+        # Veya arama sorgusunu doğrudan modelden isteyebilirsiniz.
+        # Basitlik için, kullanıcının sesini tekrar modele gönderip sorguyu çıkarttırıyoruz:
+        query_response = ollama.chat(
+            model=LLM_MODEL,
+            messages=[
+                {"role": "system", "content": "Kullanıcının sesli komutunu kısa bir arama sorgusuna dönüştür. Sadece sorguyu yaz."},
+                {"role": "user", "content": "Bu ses kaydındaki isteği analiz et ve en fazla 5 kelimelik bir arama sorgusu üret.", "images": [audio_bytes]},
+            ],
+            stream=False,
+            think=False,
+        )
+        search_query = query_response.get("message", {}).get("content", "").strip()
+        if search_query:
+            search_context = tavily_search(search_query)
+            print(f"[Tavily] Arama sorgusu: '{search_query}'")
+            print(f"[Tavily] Sonuç özeti: {search_context[:200]}...")
+
+    # 2. AŞAMA: Nihai yanıtı üret (arama bağlamı varsa ekle)
+    final_messages = [
+        {"role": "system", "content": JARVIS_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                "Bu ses kaydını dinle ve kullanıcıya J.A.R.V.I.S. karakterine uygun yanıt ver."
+                + (f"\n\nİnternetten güncel bilgiler:\n{search_context}" if search_context else "")
+            ),
+            "images": [audio_bytes],
+        },
+    ]
+    
+    response = ollama.chat(
+        model=LLM_MODEL,
+        messages=final_messages,
         stream=True,
+        think=False,
     )
 
     buffer = ""
@@ -301,7 +400,6 @@ def send_audio_and_stream_speech(full_audio):
 # ============ Ses Pipeline ============
 def process_audio_wrapper(full_audio):
     try:
-        # Yeni oturum: interrupt'ı ve kuyruğu temizle
         interrupt_requested.clear()
         while True:
             try:
@@ -311,7 +409,7 @@ def process_audio_wrapper(full_audio):
 
         send_audio_and_stream_speech(full_audio)
 
-        # TTS bitene kadar bekle (300ms onay)
+        # TTS bitene kadar bekle
         last_empty_time = None
         while True:
             if interrupt_requested.is_set():
@@ -320,7 +418,7 @@ def process_audio_wrapper(full_audio):
             if empty:
                 if last_empty_time is None:
                     last_empty_time = time.time()
-                elif time.time() - last_empty_time > 0.3:
+                elif time.time() - last_empty_time > TTS_WAIT_TIMEOUT:
                     break
             else:
                 last_empty_time = None
@@ -345,7 +443,7 @@ def continuous_listener():
     silence_counter = 0
     is_speaking = False
     bargein_counter = 0
-    recent_blocks = collections.deque(maxlen=5)
+    recent_blocks = collections.deque(maxlen=RECENT_BLOCKS_MAXLEN)
 
     with sd.InputStream(
         samplerate=SAMPLE_RATE, channels=1, blocksize=BLOCK_SIZE,
@@ -388,7 +486,7 @@ def continuous_listener():
                     if is_speaking:
                         buffer.append(audio_data)
                         silence_counter += 1
-                        if silence_counter >= 3:
+                        if silence_counter >= SILENCE_BLOCKS:
                             print("Konuşma bitti, işleniyor...")
                             full_audio = np.concatenate(buffer)
                             buffer = []
@@ -416,8 +514,8 @@ def load_llm():
     print("Loading LLM: " + LLM_MODEL)
     try:
         requests.post(
-            "http://localhost:11434/api/chat",
-            json={"model": LLM_MODEL, "keep_alive": -1},
+            f"{OLLAMA_BASE_URL}/api/chat",
+            json={"model": LLM_MODEL, "keep_alive": OLLAMA_KEEP_ALIVE},
         )
     except Exception as e:
         print(f"LLM yüklenirken hata (Ollama açık mı?): {e}")
@@ -427,10 +525,13 @@ def load_piper_tts():
     global piper_voice
     print("Piper TTS modeli yükleniyor...")
     try:
-        piper_voice = PiperVoice.load(PIPER_MODEL_NAME)
-        print("Piper TTS hazır.")
+        # use_cuda=True ile GPU'yu zorla
+        piper_voice = PiperVoice.load(PIPER_MODEL_NAME, use_cuda=True)
+        print("Piper TTS hazır (GPU).")
     except Exception as e:
-        print(f"Piper model yükleme hatası: {e}")
+        print(f"GPU yüklenemedi ({e}); CPU'ya dönülüyor.")
+        piper_voice = PiperVoice.load(PIPER_MODEL_NAME)  # CPU fallback
+        print("Piper TTS hazır (CPU).")
 
 
 def mic_monitor():
