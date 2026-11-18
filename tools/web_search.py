@@ -28,7 +28,9 @@ def _get_client():
 
 @register_tool(
     name="web_search",
-    description="Güncel bilgi, haber, hava durumu, son gelişmeler için internette arama yapar.",
+   description=(
+    "Güncel haber, son gelişmeler ve genel bilgi için internette arama yapar. "
+    "Hava durumu için get_weather aracını kullan."),
     parameters={"query": "string - arama sorgusu (en fazla 5 kelime)"},
 )
 def web_search(query, max_results=3):
