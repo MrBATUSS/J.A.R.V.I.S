@@ -16,6 +16,10 @@ from piper import PiperVoice
 import requests
 from tavily import TavilyClient
 from dotenv import load_dotenv
+import subprocess
+from tools import discover_tools, TOOLS
+import re
+
 # ============ Config ============
 CONFIG_PATH = "config.json"
 
@@ -44,8 +48,9 @@ DEFAULT_CONFIG = {
     "system_prompt": "Sen JARVIS'sin. Kısa, doğal, akıcı konuş.",
 }
 
+
 def tavily_search(query: str, max_results: int = 3) -> str:
-    #Tavily ile web araması yapar ve sonuçları metin olarak döndürür.
+    # Tavily ile web araması yapar ve sonuçları metin olarak döndürür.
     load_dotenv()
     tavily_client = TavilyClient(api_key=os.getenv("TVLY_API"))
     try:
@@ -53,25 +58,26 @@ def tavily_search(query: str, max_results: int = 3) -> str:
             query=query,
             search_depth="basic",  # "advanced" seçilirse 2 kredi harcar
             max_results=max_results,
-            include_answer=True     # Model için özet bir cevap da döndürür
+            include_answer=True,  # Model için özet bir cevap da döndürür
         )
-        
+
         # Sonuçları LLM'in anlayacağı formata dönüştür
         results_text = []
         if response.get("answer"):
             results_text.append(f"Özet: {response['answer']}")
-        
+
         for i, result in enumerate(response.get("results", []), 1):
             results_text.append(
                 f"{i}. {result['title']}\n"
                 f"   URL: {result['url']}\n"
                 f"   İçerik: {result['content'][:500]}..."  # İlk 500 karakter
             )
-        
+
         return "\n\n".join(results_text) if results_text else "Sonuç bulunamadı."
-        
+
     except Exception as e:
         return f"Arama hatası: {e}"
+
 
 def _deep_merge(dst, src):
     for k, v in src.items():
@@ -134,6 +140,7 @@ interrupt_requested = threading.Event()
 processing_event = threading.Event()
 DEBUG_MIC_COUNTER = [0]
 
+
 # ============ Otomatik ses çıkışı ============
 def pick_output_device():
     try:
@@ -148,6 +155,7 @@ def pick_output_device():
     except Exception as e:
         print(f"Cihaz seçim hatası: {e}")
     return None
+
 
 def pick_target_samplerate(device_idx, fallback=44100):
     if device_idx is None:
@@ -165,6 +173,7 @@ def pick_target_samplerate(device_idx, fallback=44100):
 OUTPUT_DEVICE = pick_output_device()
 TARGET_SR = pick_target_samplerate(OUTPUT_DEVICE)
 
+
 def _describe_output():
     if OUTPUT_DEVICE is None:
         return f"sistem default ({TARGET_SR} Hz)"
@@ -174,15 +183,18 @@ def _describe_output():
     except Exception:
         return f"cihaz {OUTPUT_DEVICE} ({TARGET_SR} Hz)"
 
-if (DEBUG_MOD == True):
+
+if DEBUG_MOD == True:
     print(f"Ses çıkışı: {_describe_output()}")
 
 
 # ============ TTS ============
 
+
 def resample_audio(data, orig_sr, target_sr):
     """float32 numpy dizisini soxr ile hızlıca resample eder."""
     return soxr.resample(data.astype(np.float32), orig_sr, target_sr)
+
 
 def synthesize_speech_piper(text):
     if not text.strip() or not piper_voice or interrupt_requested.is_set():
@@ -261,7 +273,7 @@ def _find_sentence_end(text):
                 if text[i - 1].isdigit() and text[i + 1].isdigit():
                     continue
             start = max(0, i - 6)
-            word = text[start:i + 1].lower()
+            word = text[start : i + 1].lower()
             if any(word.endswith(a) for a in _ABBREV):
                 continue
             if ch == "." and i > 0 and text[i - 1].isupper():
@@ -287,7 +299,7 @@ def extract_ready_sentences(buffer, max_chunk=180):
         last_comma = buffer.rfind(",", 0, max_chunk)
         if last_comma > 60:
             sentences.append(buffer[: last_comma + 1].strip())
-            buffer = buffer[last_comma + 1:].lstrip()
+            buffer = buffer[last_comma + 1 :].lstrip()
     return sentences, buffer
 
 
@@ -304,65 +316,100 @@ def audio_to_wav_bytes(full_audio):
     return wav_buffer.getvalue()
 
 
-def send_audio_and_stream_speech(full_audio):
-    audio_bytes = audio_to_wav_bytes(full_audio)
-    print(f"[Ses] Modele gönderiliyor ({len(audio_bytes)} bayt)...")
+def decide_tools(audio_bytes):
+    """Model bir kez çağrılır; hangi araç(lar) ve parametreleri JSON olarak döner."""
+    if not TOOLS:
+        return []
 
-    # 1. AŞAMA: Modelin aramaya ihtiyacı olup olmadığını belirle
-    # (Bu aşama hızlı olmalı, bu yüzden stream=False kullanıyoruz)
-    decision_prompt = (
-        "Kullanıcının sesli komutunu dinle. Bu komut, güncel veya dış dünya "
-        "bilgisi gerektiriyor mu? (Örneğin: hava durumu, haberler, "
-        "son dakika gelişmeleri, belirli bir konudaki güncel bilgiler). "
-        "Sadece 'EVET' veya 'HAYIR' yaz."
+    tools_desc = "\n".join(
+        f"- {t['name']}: {t['description']}\n  Parametreler: {json.dumps(t['parameters'], ensure_ascii=False)}"
+        for t in TOOLS.values()
     )
-    
-    decision_response = ollama.chat(
-        model=LLM_MODEL,
-        messages=[
-            {"role": "system", "content": "Sen bir karar vericisin. Sadece EVET veya HAYIR yaz."},
-            {"role": "user", "content": decision_prompt, "images": [audio_bytes]},
-        ],
-        stream=False,
-        think=False,
-    )
-    
-    needs_search = "EVET" in decision_response.get("message", {}).get("content", "").upper()
-    
-    search_context = ""
-    if needs_search:
-        print("Searching on web...")
-        # Kullanıcının ne sorduğunu metne dökmek için ayrı bir çağrı gerekebilir
-        # Veya arama sorgusunu doğrudan modelden isteyebilirsiniz.
-        # Basitlik için, kullanıcının sesini tekrar modele gönderip sorguyu çıkarttırıyoruz:
-        query_response = ollama.chat(
+
+    prompt = f"""Kullanıcının sesli komutunu dinle. Aşağıdaki araçlardan hangisi(leri) gerekli?
+
+    {tools_desc}
+
+    KURAL: Cevabı SADECE şu JSON formatında ver, başka hiçbir şey yazma:
+    {{"tools": [{{"name": "arac_adi", "args": {{"param": "deger"}}}}]}}
+
+    Hiçbir araç gerekmiyorsa: {{"tools": []}}
+    Birden fazla araç gerekiyorsa listeye ekle."""
+
+    try:
+        response = ollama.chat(
             model=LLM_MODEL,
             messages=[
-                {"role": "system", "content": "Kullanıcının sesli komutunu kısa bir arama sorgusuna dönüştür. Sadece sorguyu yaz."},
-                {"role": "user", "content": "Bu ses kaydındaki isteği analiz et ve en fazla 5 kelimelik bir arama sorgusu üret.", "images": [audio_bytes]},
+                {
+                    "role": "system",
+                    "content": "Sen bir araç yönlendiricisisin. Sadece JSON yazarsın.",
+                },
+                {"role": "user", "content": prompt, "images": [audio_bytes]},
             ],
             stream=False,
             think=False,
         )
-        search_query = query_response.get("message", {}).get("content", "").strip()
-        if search_query:
-            search_context = tavily_search(search_query)
-            print(f"[Tavily] Arama sorgusu: '{search_query}'")
-            print(f"[Tavily] Sonuç özeti: {search_context[:200]}...")
+        text = response.get("message", {}).get("content", "")
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if not m:
+            return []
+        data = json.loads(m.group(0))
+        return data.get("tools", []) or []
+    except Exception as e:
+        print(f"[tools] Karar hatası: {e}")
+        return []
 
-    # 2. AŞAMA: Nihai yanıtı üret (arama bağlamı varsa ekle)
+def execute_tools(tool_calls):
+    """Karar JSON'undaki araçları sırayla çalıştırır, sonuçları metne çevirir."""
+    if not tool_calls:
+        return ""
+    results = []
+    for call in tool_calls:
+        name = call.get("name")
+        args = call.get("args", {}) or {}
+        tool = TOOLS.get(name)
+        if not tool:
+            results.append(f"[{name}] bilinmeyen araç")
+            continue
+        try:
+            print(f"[tools] {name}({args}) çalışıyor...")
+            output = tool["fn"](**args)
+            results.append(f"[{name}] {output}")
+        except Exception as e:
+            results.append(f"[{name}] hata: {e}")
+    return "\n\n".join(results)
+
+def send_audio_and_stream_speech(full_audio):
+    audio_bytes = audio_to_wav_bytes(full_audio)
+    print(f"[Ses] Modele gönderiliyor ({len(audio_bytes)} bayt)...")
+
+    if interrupt_requested.is_set():
+        return
+
+    # 1) TEK KARAR ÇAĞRISI: hangi araçlar, hangi parametrelerle?
+    tool_calls = decide_tools(audio_bytes)
+    tool_context = ""
+    if tool_calls:
+        print(f"[tools] Seçilen: {[c.get('name') for c in tool_calls]}")
+        tool_context = execute_tools(tool_calls)
+        print(f"[tools] Sonuç: {tool_context[:200]}...")
+
+    if interrupt_requested.is_set():
+        return
+
+    # 2) NİHAİ YANIT (streaming)
     final_messages = [
         {"role": "system", "content": JARVIS_SYSTEM_PROMPT},
         {
             "role": "user",
             "content": (
                 "Bu ses kaydını dinle ve kullanıcıya J.A.R.V.I.S. karakterine uygun yanıt ver."
-                + (f"\n\nİnternetten güncel bilgiler:\n{search_context}" if search_context else "")
+                + (f"\n\nAraç sonuçları:\n{tool_context}" if tool_context else "")
             ),
             "images": [audio_bytes],
         },
     ]
-    
+
     response = ollama.chat(
         model=LLM_MODEL,
         messages=final_messages,
@@ -443,14 +490,17 @@ def continuous_listener():
     recent_blocks = collections.deque(maxlen=RECENT_BLOCKS_MAXLEN)
 
     with sd.InputStream(
-        samplerate=SAMPLE_RATE, channels=1, blocksize=BLOCK_SIZE,
-        callback=audio_callback, dtype=np.float32,
+        samplerate=SAMPLE_RATE,
+        channels=1,
+        blocksize=BLOCK_SIZE,
+        callback=audio_callback,
+        dtype=np.float32,
     ):
         while True:
             try:
                 block = audio_queue.get(timeout=0.1)
                 audio_data = block.squeeze()
-                energy = np.sqrt(np.mean(audio_data ** 2))
+                energy = np.sqrt(np.mean(audio_data**2))
                 recent_blocks.append(audio_data)
 
                 # ---- BARGE-IN ----
@@ -504,9 +554,33 @@ def continuous_listener():
             except KeyboardInterrupt:
                 print("\nDinleme durduruluyor...")
                 break
-            
+
+
 # ============ Yükleme ============
+def isOllamaRunning(base_url):
+    try:
+        response = requests.get(base_url, timeout=4)
+        return response.status_code == 200
+    except requests.exceptions.RequestException:
+        return False
+
 def load_llm():
+    if not isOllamaRunning(OLLAMA_BASE_URL):
+        print("Serving Ollama...")
+        subprocess.Popen(
+            ["ollama", "serve"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        for _ in range(20):
+            if isOllamaRunning(OLLAMA_BASE_URL):
+                break
+            time.sleep(0.5)
+        else:
+            print("Ollama Server Cannot be started.")
+    else:
+        print("Ollama allready running!")
+    
     print("Loading LLM: " + LLM_MODEL)
     try:
         requests.post(
@@ -532,12 +606,13 @@ def mic_monitor():
         diff = cur - last
         last = cur
         state = "TTS" if (tts_active.is_set() or not tts_queue.empty()) else "BOŞTA"
-        if (DEBUG_MOD == True):
+        if DEBUG_MOD == True:
             print(f"[DEBUG] Mikrofon {diff} blok/sn  (durum: {state})")
 
 
 if __name__ == "__main__":
     load_llm()
+    discover_tools()
     load_piper_tts()
 
     threading.Thread(target=tts_worker, daemon=True).start()
