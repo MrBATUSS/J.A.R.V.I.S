@@ -20,6 +20,7 @@ import subprocess
 from tools import discover_tools, TOOLS
 import re
 
+load_dotenv()
 # ============ Config ============
 CONFIG_PATH = "config.json"
 
@@ -47,37 +48,6 @@ DEFAULT_CONFIG = {
     },
     "system_prompt": "Sen JARVIS'sin. Kısa, doğal, akıcı konuş.",
 }
-
-
-def tavily_search(query: str, max_results: int = 3) -> str:
-    # Tavily ile web araması yapar ve sonuçları metin olarak döndürür.
-    load_dotenv()
-    tavily_client = TavilyClient(api_key=os.getenv("TVLY_API"))
-    try:
-        response = tavily_client.search(
-            query=query,
-            search_depth="basic",  # "advanced" seçilirse 2 kredi harcar
-            max_results=max_results,
-            include_answer=True,  # Model için özet bir cevap da döndürür
-        )
-
-        # Sonuçları LLM'in anlayacağı formata dönüştür
-        results_text = []
-        if response.get("answer"):
-            results_text.append(f"Özet: {response['answer']}")
-
-        for i, result in enumerate(response.get("results", []), 1):
-            results_text.append(
-                f"{i}. {result['title']}\n"
-                f"   URL: {result['url']}\n"
-                f"   İçerik: {result['content'][:500]}..."  # İlk 500 karakter
-            )
-
-        return "\n\n".join(results_text) if results_text else "Sonuç bulunamadı."
-
-    except Exception as e:
-        return f"Arama hatası: {e}"
-
 
 def _deep_merge(dst, src):
     for k, v in src.items():

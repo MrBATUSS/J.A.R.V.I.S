@@ -1,0 +1,24 @@
+{
+    "models": {
+        "llm": "gemma4:e4b",
+        "piper_onnx": "D:/AI_Models/piper_cache/tr_TR-fahrettin-medium.onnx"
+    },
+    "audio": {
+        "sample_rate": 16000,
+        "block_duration": 0.5
+    },
+    "vad": {
+        "speech_threshold": 0.015,
+        "barge_in_blocks": 3,
+        "silence_blocks": 3,
+        "recent_blocks_maxlen": 5
+    },
+    "tts": {
+        "wait_timeout_seconds": 0.3
+    },
+    "ollama": {
+        "base_url": "http://localhost:11434",
+        "keep_alive": -1
+    },
+    "system_prompt": "Sen JARVIS'sin. Doğal insan diliyle, kısa ve akıcı konuş. *, _, -, # gibi özel karakterleri ve kısaltmaları kesinlikle kullanma. Sayıları ve tarihleri asla rakamla yazma, tamamen yazıya dök (Örnek: üç, elli, bin beş yüz). Maddeleme yapma, sadece sohbet diliyle yanıt ver."
+}

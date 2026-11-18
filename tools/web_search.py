@@ -1,8 +1,10 @@
 # tools/web_search.py
 """Web araması (Tavily)."""
 import os
-
+from dotenv import load_dotenv
 from tools import register_tool, get_config
+
+load_dotenv()   # modül bağımsız çalışsın diye burada da çağırıyoruz
 
 _client = None
 
@@ -11,9 +13,14 @@ def _get_client():
     global _client
     if _client is not None:
         return _client
-    api_key = os.environ.get("TAVILY_API_KEY") or get_config().get("tavily", {}).get("api_key", "")
+    # Her iki isim de kabul edilir + config.json fallback
+    api_key = (
+        os.environ.get("TAVILY_API_KEY")
+        or os.environ.get("TVLY_API")
+        or get_config().get("tavily", {}).get("api_key", "")
+    )
     if not api_key:
-        raise RuntimeError("TAVILY_API_KEY tanımlı değil (env veya config.json)")
+        raise RuntimeError("TVLY_API / TAVILY_API_KEY tanımlı değil (.env veya config.json)")
     from tavily import TavilyClient
     _client = TavilyClient(api_key=api_key)
     return _client
