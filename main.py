@@ -19,8 +19,8 @@ from dotenv import load_dotenv
 import subprocess
 from tools import discover_tools, TOOLS
 import re
+from datetime import datetime, timedelta
 
-load_dotenv()
 # ============ Config ============
 CONFIG_PATH = "config.json"
 
@@ -47,7 +47,16 @@ DEFAULT_CONFIG = {
         "keep_alive": -1,
     },
     "system_prompt": "Sen JARVIS'sin. Kısa, doğal, akıcı konuş.",
+    "tools": {
+        "tavily": {
+            "api_key": ""
+        },
+        "openweather": {
+            "api_key": ""
+        }
+    },
 }
+load_dotenv()
 
 def _deep_merge(dst, src):
     for k, v in src.items():
@@ -110,6 +119,20 @@ interrupt_requested = threading.Event()
 processing_event = threading.Event()
 DEBUG_MIC_COUNTER = [0]
 
+# -------- TARİH ve SAAT -----------
+def _current_time_context():
+    try:
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo("Europe/Istanbul"))
+    except Exception:
+        now = datetime.now()
+    gunler = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"]
+    yarin = now + timedelta(days=1)
+    return (
+        f"ŞU AN: {now.strftime('%Y-%m-%d')} {gunler[now.weekday()]} "
+        f"saat {now.strftime('%H:%M')}. Yarın: {yarin.strftime('%Y-%m-%d')}. "
+        f"Göreceli ifadeleri bu tarihe göre hesapla, geçmiş tarih yazma."
+    )
 
 # ============ Otomatik ses çıkışı ============
 def pick_output_device():
@@ -296,7 +319,7 @@ def decide_tools(audio_bytes):
         for t in TOOLS.values()
     )
 
-    prompt = f"""Kullanıcının sesli komutunu dinle. Aşağıdaki araçlardan hangisi(leri) gerekli?
+    prompt = f"""{_current_time_context()} Kullanıcının sesli komutunu dinle. Aşağıdaki araçlardan hangisi(leri) gerekli?
 
     {tools_desc}
 
@@ -328,6 +351,158 @@ def decide_tools(audio_bytes):
     except Exception as e:
         print(f"[tools] Karar hatası: {e}")
         return []
+
+# ============ Metin Modu ============
+def decide_tools_text(prompt_text):
+    """Metin için araç kararı - Ollama native tools API kullanır."""
+    if not TOOLS:
+        return []
+
+    # parameters dict'ini JSON Schema'ya çevir
+    tools_schema = []
+    for t in TOOLS.values():
+        props = {}
+        for pname, pdesc in t["parameters"].items():
+            props[pname] = {"type": "string", "description": pdesc}
+        tools_schema.append({
+            "type": "function",
+            "function": {
+                "name": t["name"],
+                "description": t["description"],
+                "parameters": {
+                    "type": "object",
+                    "properties": props,
+                    "required": list(t["parameters"].keys()),
+                },
+            },
+        })
+
+    try:
+        enriched = f"{_current_time_context()}\n\nKullanıcı mesajı: {prompt_text}"
+        response = ollama.chat(
+            model=LLM_MODEL,
+            messages=[{"role": "user", "content": enriched}],
+            tools=tools_schema,
+            stream=False,
+            think=False,
+        )
+
+        msg = response.get("message", {})
+        raw_calls = msg.get("tool_calls") or []
+
+        # Debug: model gerçekten tool çağırdı mı?
+        if raw_calls:
+            print(f"[tools-debug] {len(raw_calls)} tool call döndü")
+        else:
+            print(f"[tools-debug] tool çağrısı yok; model cevabı: {msg.get('content','')[:150]!r}")
+
+        out = []
+        for tc in raw_calls:
+            fn = tc.get("function", {})
+            args = fn.get("arguments", {})
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except Exception:
+                    args = {}
+            out.append({"name": fn.get("name"), "args": args})
+        return out
+    except Exception as e:
+        print(f"[tools] Karar hatası (native): {type(e).__name__}: {e}")
+        return []
+
+
+def send_text_and_stream_speech(prompt_text, speak=True):
+    """Metin promptunu LLM'e gönderir. speak=True ise yanıtı sesli de okur."""
+    if not prompt_text.strip():
+        return
+
+    # 1) Araç kararı
+    tool_calls = decide_tools_text(prompt_text)
+    tool_context = ""
+    if tool_calls:
+        print(f"[tools] Seçilen: {[c.get('name') for c in tool_calls]}")
+        tool_context = execute_tools(tool_calls)
+        print(f"[tools] Sonuç: {tool_context[:200]}...")
+
+    # 2) Nihai yanıt (streaming)
+    final_messages = [
+        {"role": "system", "content": JARVIS_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"{_current_time_context()}\n\n"
+                f"Kullanıcının mesajı: {prompt_text}"
+                + (f"\n\nAraç sonuçları:\n{tool_context}" if tool_context else "")
+            ),
+        },
+    ]
+
+    response = ollama.chat(
+        model=LLM_MODEL,
+        messages=final_messages,
+        stream=True,
+        think=False,
+    )
+
+    buffer = ""
+    print("[AI Yanıtı]: ", end="", flush=True)
+
+    for chunk in response:
+        piece = chunk.get("message", {}).get("content", "")
+        if not piece:
+            continue
+        buffer += piece
+        print(piece, end="", flush=True)
+
+        if speak:
+            ready, buffer = extract_ready_sentences(buffer)
+            for sentence in ready:
+                tts_queue.put(sentence)
+
+    if speak and buffer.strip():
+        tts_queue.put(buffer.strip())
+    print()
+
+    # TTS açıksa bitene kadar bekle
+    if speak:
+        last_empty_time = None
+        while True:
+            if tts_queue.empty() and not tts_active.is_set():
+                if last_empty_time is None:
+                    last_empty_time = time.time()
+                elif time.time() - last_empty_time > TTS_WAIT_TIMEOUT:
+                    break
+            else:
+                last_empty_time = None
+            time.sleep(0.05)
+
+
+def run_text_mode(speak=True):
+    """Klavyeden prompt alır, her prompt için pipeline'ı çalıştırır."""
+    print("\n=== METİN MODU ===")
+    if speak:
+        print("Yanıtlar hem yazılı hem sesli. Çıkmak için 'exit' veya Ctrl+C.\n")
+    else:
+        print("TTS kapalı, sadece yazılı yanıt. Çıkmak için 'exit' veya Ctrl+C.\n")
+
+    try:
+        while True:
+            try:
+                prompt = input("Sen> ").strip()
+            except EOFError:
+                break
+            if not prompt:
+                continue
+            if prompt.lower() in ("exit", "quit", "çık", "cik", "q"):
+                break
+            try:
+                send_text_and_stream_speech(prompt, speak=speak)
+            except Exception as e:
+                print(f"Hata: {type(e).__name__}: {e}")
+            print()
+    except KeyboardInterrupt:
+        print("\nGörüşürüz.")
 
 def execute_tools(tool_calls):
     """Karar JSON'undaki araçları sırayla çalıştırır, sonuçları metne çevirir."""
@@ -373,6 +548,7 @@ def send_audio_and_stream_speech(full_audio):
         {
             "role": "user",
             "content": (
+                f"{_current_time_context()}\n\n"
                 "Bu ses kaydını dinle ve kullanıcıya J.A.R.V.I.S. karakterine uygun yanıt ver."
                 + (f"\n\nAraç sonuçları:\n{tool_context}" if tool_context else "")
             ),
@@ -581,15 +757,36 @@ def mic_monitor():
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="J.A.R.V.I.S.")
+    parser.add_argument("--text", "-t", action="store_true",
+                        help="Metin modu (mikrofon yerine klavye)")
+    parser.add_argument("--no-tts", action="store_true",
+                        help="TTS'i kapat (sadece yazılı yanıt)")
+    args = parser.parse_args()
+
     load_llm()
     discover_tools()
-    load_piper_tts()
 
-    threading.Thread(target=tts_worker, daemon=True).start()
-    threading.Thread(target=mic_monitor, daemon=True).start()
-
-    print("Sistem tam gaz hazır!")
-    try:
-        continuous_listener()
-    finally:
-        tts_queue.put(None)
+    if args.text:
+        # ===== METİN MODU =====
+        speak = not args.no_tts
+        if speak:
+            load_piper_tts()
+            threading.Thread(target=tts_worker, daemon=True).start()
+        try:
+            run_text_mode(speak=speak)
+        finally:
+            if speak:
+                tts_queue.put(None)
+    else:
+        # ===== SESLİ MOD (mevcut) =====
+        load_piper_tts()
+        threading.Thread(target=tts_worker, daemon=True).start()
+        threading.Thread(target=mic_monitor, daemon=True).start()
+        print("Sistem tam gaz hazır!")
+        try:
+            continuous_listener()
+        finally:
+            tts_queue.put(None)

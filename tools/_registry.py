@@ -23,10 +23,10 @@ def register_tool(name, description, parameters):
 
 
 def get_config():
-    """config.json'u bir kez okur, cache'ler. Araçlar paylaşımlı kullanır."""
+    """config.json'u bir kez okur, cache'ler."""
     global _config_cache
     if _config_cache is None:
-        path = "config.json"
+        path = os.environ.get("JARVIS_CONFIG", "config.json")
         if os.path.exists(path):
             with open(path, "r", encoding="utf-8") as f:
                 _config_cache = json.load(f)

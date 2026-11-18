@@ -2,20 +2,19 @@
 """Hava durumu (OpenWeatherMap)."""
 import os
 import requests
-from dotenv import load_dotenv
 from tools import register_tool, get_config
-
-load_dotenv()
 
 API_URL = "https://api.openweathermap.org/data/2.5/weather"
 
 
 def _get_api_key():
+    cfg = get_config()
     return (
-        os.environ.get("OPENWEATHER_API_KEY")
+        cfg.get("tools", {}).get("openweather", {}).get("api_key", "")
+        or os.environ.get("OPENWEATHER_API_KEY")
         or os.environ.get("OWM_API_KEY")
-        or get_config().get("openweather", {}).get("api_key", "")
-    )
+        or ""
+    ).strip()
 
 
 @register_tool(
@@ -33,20 +32,14 @@ def _get_api_key():
 def get_weather(city):
     api_key = _get_api_key()
     if not api_key:
-        return "Hava durumu hatası: OPENWEATHER_API_KEY tanımlı değil (.env)"
+        return "Hava durumu hatası: OpenWeatherMap anahtarı yok (config.json -> tools.openweather.api_key)"
 
     try:
         r = requests.get(
             API_URL,
-            params={
-                "q": city,
-                "appid": api_key,
-                "units": "metric",   # Celsius
-                "lang": "tr",        # Türkçe açıklama
-            },
+            params={"q": city, "appid": api_key, "units": "metric", "lang": "tr"},
             timeout=5,
         )
-
         if r.status_code == 401:
             return "Hava durumu hatası: API anahtarı geçersiz"
         if r.status_code == 404:

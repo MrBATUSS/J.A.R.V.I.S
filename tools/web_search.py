@@ -1,26 +1,35 @@
 # tools/web_search.py
 """Web araması (Tavily)."""
 import os
-from dotenv import load_dotenv
 from tools import register_tool, get_config
 
-load_dotenv()   # modül bağımsız çalışsın diye burada da çağırıyoruz
-
 _client = None
+
+
+def _get_api_key():
+    # Öncelik sırası:
+    # 1) config.json -> tools.tavily.api_key
+    # 2) .env -> TAVILY_API_KEY veya TVLY_API
+    cfg = get_config()
+    key = (
+        cfg.get("tools", {}).get("tavily", {}).get("api_key", "")
+        or os.environ.get("TAVILY_API_KEY")
+        or os.environ.get("TVLY_API")
+        or ""
+    )
+    return key.strip()
 
 
 def _get_client():
     global _client
     if _client is not None:
         return _client
-    # Her iki isim de kabul edilir + config.json fallback
-    api_key = (
-        os.environ.get("TAVILY_API_KEY")
-        or os.environ.get("TVLY_API")
-        or get_config().get("tavily", {}).get("api_key", "")
-    )
+    api_key = _get_api_key()
     if not api_key:
-        raise RuntimeError("TVLY_API / TAVILY_API_KEY tanımlı değil (.env veya config.json)")
+        raise RuntimeError(
+            "Tavily API anahtarı yok. config.json -> tools.tavily.api_key "
+            "veya .env -> TVLY_API"
+        )
     from tavily import TavilyClient
     _client = TavilyClient(api_key=api_key)
     return _client
@@ -28,9 +37,10 @@ def _get_client():
 
 @register_tool(
     name="web_search",
-   description=(
-    "Güncel haber, son gelişmeler ve genel bilgi için internette arama yapar. "
-    "Hava durumu için get_weather aracını kullan."),
+    description=(
+        "Güncel haber, son gelişmeler ve genel bilgi için internette arama yapar. "
+        "Hava durumu için get_weather aracını kullan."
+    ),
     parameters={"query": "string - arama sorgusu (en fazla 5 kelime)"},
 )
 def web_search(query, max_results=3):

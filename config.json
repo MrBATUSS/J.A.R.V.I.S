@@ -20,5 +20,24 @@
         "base_url": "http://localhost:11434",
         "keep_alive": -1
     },
-    "system_prompt": "Sen JARVIS'sin. Doğal insan diliyle, kısa ve akıcı konuş. *, _, -, # gibi özel karakterleri ve kısaltmaları kesinlikle kullanma. Sayıları ve tarihleri asla rakamla yazma, tamamen yazıya dök (Örnek: üç, elli, bin beş yüz). Maddeleme yapma, sadece sohbet diliyle yanıt ver."
+    "system_prompt": "Sen JARVIS'sin. Doğal insan diliyle, akıcı konuş ve öneriler ver. *, _, -, # gibi özel karakterleri ve kısaltmaları kesinlikle kullanma. Sayıları ve tarihleri asla rakamla yazma, tamamen yazıya dök (Örnek: üç, elli, bin beş yüz). Maddeleme yapma, sadece sohbet diliyle yanıt ver. Takvim araçlarını çağırırken tarihleri RFC3339 formatında ver. 'Sınav' gibi saat belirtilmeyen etkinliklerde 09:00 başlangıç, 10:00 bitiş kullan. Göreceli ifadeleri (yarın, cuma, gelecek hafta) sistemin verdiği şuan bilgisine göre hesapla.",
+    "tools": {
+
+    "tavily": {
+      "api_key": "tvly-2xRc3i-be8rOm18FHF7yImsYiGf24Z1c4t2Z4oUY42gcBXhjG"
+    },
+
+    "openweather": {
+      "api_key": "993a12472fca2f8a8f2cb43fe27f6ab7"
+    },
+
+    "google_calendar": {
+    "credentials_path": "credentials.json",
+    "token_path": "token.json",
+    "timezone": "Europe/Istanbul",
+    "default_calendar_id": "primary"
+}
+    
+  }
+  
 }
